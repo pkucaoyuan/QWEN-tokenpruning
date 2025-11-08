@@ -89,6 +89,7 @@ def check_and_fix_environment():
         "accelerate": "accelerate",
         "safetensors": "safetensors",
         "huggingface_hub": "huggingface_hub",
+        "peft": "peft",  # ⭐ LoRA 加载必需
     }
     
     for module_name, package_name in dependencies.items():

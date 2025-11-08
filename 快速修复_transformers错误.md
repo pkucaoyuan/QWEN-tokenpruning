@@ -1,6 +1,8 @@
 # 快速修复：transformers 兼容性错误
 
-## ❌ 错误信息
+## ❌ 常见错误
+
+### 错误1：transformers 兼容性
 
 ```
 AttributeError: 'dict' object has no attribute 'to_dict'
@@ -8,11 +10,19 @@ AttributeError: 'dict' object has no attribute 'to_dict'
 
 发生在加载 Qwen2.5-VL text_encoder 时。
 
+### 错误2：PEFT backend 缺失
+
+```
+ValueError: PEFT backend is required for this method.
+```
+
+发生在加载 LoRA 权重时。
+
 ---
 
 ## ✅ 解决方案
 
-### **方法1：自动修复（推荐）**
+### **方法1：自动修复（推荐）⭐**
 
 运行环境检查和修复脚本：
 
@@ -23,20 +33,20 @@ python 0_环境检查和修复.py
 此脚本会：
 - ✅ 自动检查所有依赖
 - ✅ 自动升级 transformers 到 4.48.0+
+- ✅ **自动安装 peft 库**
 - ✅ 自动修复环境问题
 - ✅ 自动转换图片格式
 
 ---
 
-### **方法2：手动升级 transformers**
+### **方法2：手动修复（快速）**
 
 ```bash
+# 安装缺失的依赖
 pip install --upgrade transformers>=4.48.0
-```
+pip install peft>=0.13.0
 
-然后重新运行：
-
-```bash
+# 重新运行
 python 2_load_and_inference_lightning.py
 ```
 
@@ -76,6 +86,7 @@ accelerate>=0.20.0
 pillow>=9.0.0
 safetensors>=0.3.0
 huggingface_hub>=0.20.0
+peft>=0.13.0  ⭐ LoRA 加载必需
 ```
 
 ---
