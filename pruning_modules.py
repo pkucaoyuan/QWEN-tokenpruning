@@ -234,17 +234,6 @@ class PrunableQwenDoubleStreamAttnProcessor:
             img_query = attn.to_q(hidden_states)
             img_key = attn.to_k(hidden_states)
             img_value = attn.to_v(hidden_states)
-            
-            # ⚡ 如果需要缓存，保存 image tokens 的 K, V
-            if should_cache and L_denoise is not None:
-                layer_idx = getattr(attn, '_layer_idx', None)
-                if layer_idx is not None:
-                    # ⚡ 直接传递 slice（view），cache_layer_kv 会使用 copy_() 到预分配的 buffer
-                    # 避免 clone() 触发新的内存分配
-                    image_k = img_key[:, L_denoise:]
-                    image_v = img_value[:, L_denoise:]
-                    # 暂时用 None 占位，Block 层面会更新
-                    global_pruning_cache.cache_layer_kv(layer_idx, image_k, image_v, None)
         
         # 文本流：始终正常计算
         txt_query = attn.add_q_proj(encoder_hidden_states)
@@ -291,6 +280,15 @@ class PrunableQwenDoubleStreamAttnProcessor:
             
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+        
+        # ⚡⚡⚡ 关键修复：在 reshape/norm/RoPE 之后缓存！
+        if should_cache and L_denoise is not None and not should_prune:
+            layer_idx = getattr(attn, '_layer_idx', None)
+            if layer_idx is not None:
+                # 缓存经过完整处理的 K, V（reshape + norm + RoPE 之后）
+                image_k = img_key[:, L_denoise:].clone()
+                image_v = img_value[:, L_denoise:].clone()
+                global_pruning_cache.cache_layer_kv(layer_idx, image_k, image_v, None)
         
         # ===== Concatenate for joint attention =====
         # 注意：img_query 可能比 img_key, img_value 短（pruning 时）
