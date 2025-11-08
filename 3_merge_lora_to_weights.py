@@ -54,10 +54,14 @@ def merge_lora_and_save():
     pipe.fuse_lora(lora_scale=1.0)
     print("   ✅ LoRA 已融合")
     
+    # 移动到 CPU 以便正确保存
+    print("\n4.5 准备保存（移动到 CPU）...")
+    pipe.to("cpu")
+    
     # 步骤5: 保存融合后的模型
     output_dir = "./models/qwen-image-edit-lightning-merged"
     print(f"\n5. 保存融合后的模型到: {output_dir}")
-    pipe.save_pretrained(output_dir)
+    pipe.save_pretrained(output_dir, safe_serialization=True)
     
     print("\n✅ 完成！融合后的模型已保存")
     print(f"\n之后可以直接加载融合后的模型：")
