@@ -36,7 +36,7 @@ class TokenPruningCache:
         self._buffers_initialized = False
         
         # 🔬 性能调试：记录缓存操作时间
-        self.debug_timing = False  # ⚠️ 默认关闭，避免同步开销
+        self.debug_timing = True  # 🔬 开启详细计时以找出瓶颈
         self.cache_write_time = 0.0  # 累积缓存写入时间
         self.cache_read_time = 0.0   # 累积缓存读取时间
         self.num_cache_writes = 0
@@ -48,9 +48,17 @@ class TokenPruningCache:
         self.num_clones = 0
         self.num_copies = 0
         
-        # 🔬 步骤级别计时
-        self.step_compute_time = [0.0, 0.0, 0.0, 0.0]  # 每步的纯计算时间（不含缓存）
-        self.step_cache_time = [0.0, 0.0, 0.0, 0.0]    # 每步的缓存时间
+        # 🔬 详细的操作计时（找出真正的瓶颈）
+        self.time_qkv_projection = 0.0  # QKV 投影时间
+        self.time_reshape = 0.0         # Reshape 时间
+        self.time_norm = 0.0            # Normalization 时间
+        self.time_rope = 0.0            # RoPE 时间
+        self.time_cat = 0.0             # torch.cat 时间
+        self.time_attention = 0.0       # Attention 计算时间
+        self.time_output_proj = 0.0     # 输出投影时间
+        self.time_mlp = 0.0             # MLP 时间
+        self.time_conditions = 0.0      # 条件判断时间
+        self.count_operations = 0       # 操作计数
         
     def should_prune_current_step(self) -> bool:
         """判断当前步骤是否需要 prune"""
@@ -202,42 +210,39 @@ class TokenPruningCache:
         # ⚡ 注意：不清空 _preallocated_buffers，复用已分配的内存
     
     def print_timing_stats(self):
-        """🔬 打印缓存操作的时间统计"""
+        """🔬 打印详细的性能统计"""
         if not self.debug_timing:
             return
         
         print("\n" + "=" * 70)
-        print("🔬 缓存操作性能统计（详细）")
+        print("🔬 详细性能分析（找出瓶颈）")
         print("=" * 70)
         
-        print(f"1️⃣ Clone 操作:")
-        print(f"  次数: {self.num_clones}")
-        print(f"  时间: {self.clone_time:.4f}s")
-        if self.num_clones > 0:
-            print(f"  平均: {self.clone_time/self.num_clones*1000:.2f}ms/次")
+        total_time = (self.time_qkv_projection + self.time_reshape + self.time_norm + 
+                     self.time_rope + self.time_cat + self.time_attention + 
+                     self.time_output_proj + self.time_mlp + self.time_conditions)
         
-        print(f"\n2️⃣ Copy 操作:")
-        print(f"  次数: {self.num_copies}")
-        print(f"  时间: {self.copy_time:.4f}s")
-        if self.num_copies > 0:
-            print(f"  平均: {self.copy_time/self.num_copies*1000:.2f}ms/次")
+        print(f"操作计数: {self.count_operations} 次")
+        print(f"\n各操作耗时：")
+        print(f"  1️⃣  QKV 投影:     {self.time_qkv_projection:.4f}s ({self.time_qkv_projection/total_time*100:.1f}%)")
+        print(f"  2️⃣  Reshape:      {self.time_reshape:.4f}s ({self.time_reshape/total_time*100:.1f}%)")
+        print(f"  3️⃣  Normalization: {self.time_norm:.4f}s ({self.time_norm/total_time*100:.1f}%)")
+        print(f"  4️⃣  RoPE:         {self.time_rope:.4f}s ({self.time_rope/total_time*100:.1f}%)")
+        print(f"  5️⃣  torch.cat:    {self.time_cat:.4f}s ({self.time_cat/total_time*100:.1f}%)")
+        print(f"  6️⃣  Attention:    {self.time_attention:.4f}s ({self.time_attention/total_time*100:.1f}%)")
+        print(f"  7️⃣  输出投影:     {self.time_output_proj:.4f}s ({self.time_output_proj/total_time*100:.1f}%)")
+        print(f"  8️⃣  MLP:          {self.time_mlp:.4f}s ({self.time_mlp/total_time*100:.1f}%)")
+        print(f"  9️⃣  条件判断:     {self.time_conditions:.4f}s ({self.time_conditions/total_time*100:.1f}%)")
         
-        print(f"\n3️⃣ 缓存写入（clone + copy）:")
-        print(f"  总次数: {self.num_cache_writes}")
-        print(f"  总时间: {self.cache_write_time:.4f}s")
-        if self.num_cache_writes > 0:
-            print(f"  平均: {self.cache_write_time/self.num_cache_writes*1000:.2f}ms/次")
-        
-        print(f"\n4️⃣ 缓存读取:")
-        print(f"  总次数: {self.num_cache_reads}")
-        print(f"  总时间: {self.cache_read_time:.4f}s")
-        if self.num_cache_reads > 0:
-            print(f"  平均: {self.cache_read_time/self.num_cache_reads*1000:.2f}ms/次")
+        print(f"\n缓存操作：")
+        print(f"  写入次数: {self.num_cache_writes}, 时间: {self.cache_write_time:.4f}s")
+        print(f"  读取次数: {self.num_cache_reads}, 时间: {self.cache_read_time:.4f}s")
+        print(f"  缓存总开销: {self.cache_write_time + self.cache_read_time:.4f}s")
         
         print(f"\n" + "-" * 70)
-        print(f"📊 总缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
-        print(f"   - Clone 贡献: {self.clone_time:.4f}s ({self.clone_time/(self.cache_write_time+self.cache_read_time+0.0001)*100:.1f}%)")
-        print(f"   - Copy 贡献: {self.copy_time:.4f}s ({self.copy_time/(self.cache_write_time+self.cache_read_time+0.0001)*100:.1f}%)")
+        print(f"📊 统计的总时间: {total_time:.4f}s")
+        print(f"   缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
+        print(f"   计算+缓存: {total_time + self.cache_write_time + self.cache_read_time:.4f}s")
         print("=" * 70)
     
     def reset_timing_stats(self):
@@ -306,6 +311,12 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if encoder_hidden_states is None:
             raise ValueError("需要 encoder_hidden_states (text stream)")
         
+        # 🔬 开始详细计时
+        if global_pruning_cache.debug_timing:
+            op_start = torch.cuda.Event(enable_timing=True)
+            op_end = torch.cuda.Event(enable_timing=True)
+            global_pruning_cache.count_operations += 1
+        
         # 检查是否需要 pruning
         should_prune = global_pruning_cache.should_prune_current_step()
         should_cache = global_pruning_cache.should_cache_current_step()
@@ -332,6 +343,10 @@ class PrunableQwenDoubleStreamAttnProcessor:
                 )
         
         # ===== 计算 QKV =====
+        # 🔬 计时 QKV 投影
+        if global_pruning_cache.debug_timing:
+            op_start.record()
+        
         if should_prune:
             # ⚡ Pruning 模式：使用缓存的 K, V（已经过 reshape/norm/RoPE），不重新计算！
             denoise_hidden = hidden_states[:, :L_denoise]
@@ -380,7 +395,16 @@ class PrunableQwenDoubleStreamAttnProcessor:
         txt_key = attn.add_k_proj(encoder_hidden_states)
         txt_value = attn.add_v_proj(encoder_hidden_states)
         
+        # 🔬 记录 QKV 投影时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_qkv_projection += op_start.elapsed_time(op_end) / 1000.0
+        
         # ===== Reshape for multi-head attention =====
+        # 🔬 计时 Reshape
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         # ⚡ 如果使用了缓存，img 部分已经 reshape 过了
         if not skip_transform:
             img_query = img_query.unflatten(-1, (attn.heads, -1))
@@ -391,7 +415,16 @@ class PrunableQwenDoubleStreamAttnProcessor:
         txt_key = txt_key.unflatten(-1, (attn.heads, -1))
         txt_value = txt_value.unflatten(-1, (attn.heads, -1))
         
+        # 🔬 记录 Reshape 时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_reshape += op_start.elapsed_time(op_end) / 1000.0
+        
         # ===== QK normalization =====
+        # 🔬 计时 Normalization
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         # ⚡ 如果使用了缓存，img 部分已经 norm 过了
         if not skip_transform:
             if attn.norm_q is not None:
@@ -404,7 +437,16 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if attn.norm_added_k is not None:
             txt_key = attn.norm_added_k(txt_key)
         
+        # 🔬 记录 Norm 时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_norm += op_start.elapsed_time(op_end) / 1000.0
+        
         # ===== Apply RoPE =====
+        # 🔬 计时 RoPE
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         # ⚡ 如果使用了缓存，img 部分已经 RoPE 过了
         if not skip_transform and image_rotary_emb is not None:
             img_freqs, txt_freqs = image_rotary_emb
@@ -415,6 +457,12 @@ class PrunableQwenDoubleStreamAttnProcessor:
             _, txt_freqs = image_rotary_emb
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+        
+        # 🔬 记录 RoPE 时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_rope += op_start.elapsed_time(op_end) / 1000.0
         
         # ⚡⚡⚡ 关键修复：在 reshape/norm/RoPE 之后缓存！
         if should_cache and L_denoise is not None and not should_prune:
@@ -428,12 +476,24 @@ class PrunableQwenDoubleStreamAttnProcessor:
                 global_pruning_cache.cache_layer_kv(layer_idx, image_k, image_v, None)
         
         # ===== Concatenate for joint attention =====
+        # 🔬 计时 torch.cat
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         # 注意：img_query 可能比 img_key, img_value 短（pruning 时）
         joint_query = torch.cat([txt_query, img_query], dim=1)  # 可能缺少 image query
         joint_key = torch.cat([txt_key, img_key], dim=1)        # 完整的 key
         joint_value = torch.cat([txt_value, img_value], dim=1)  # 完整的 value
         
+        # 🔬 记录 cat 时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_cat += op_start.elapsed_time(op_end) / 1000.0
+        
         # ===== Attention mask 处理 =====
+        # 🔬 计时 Attention
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         if encoder_hidden_states_mask is not None:
             # 为 text tokens 创建 mask
             batch_size = joint_query.shape[0]
@@ -471,7 +531,16 @@ class PrunableQwenDoubleStreamAttnProcessor:
             parallel_config=self._parallel_config,
         )
         
+        # 🔬 记录 Attention 时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_attention += op_start.elapsed_time(op_end) / 1000.0
+        
         # ===== Reshape back =====
+        # 🔬 计时输出投影
+        if global_pruning_cache.debug_timing:
+            op_start.record()
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
         joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
         
@@ -485,6 +554,12 @@ class PrunableQwenDoubleStreamAttnProcessor:
             img_attn_output = attn.to_out[1](img_attn_output)
         
         txt_attn_output = attn.to_add_out(txt_attn_output)
+        
+        # 🔬 记录输出投影时间
+        if global_pruning_cache.debug_timing:
+            op_end.record()
+            torch.cuda.synchronize()
+            global_pruning_cache.time_output_proj += op_start.elapsed_time(op_end) / 1000.0
         
         # ===== 返回输出 =====
         # 注意：在 pruning 模式下，img_attn_output 只包含去噪部分
