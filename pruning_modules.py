@@ -35,6 +35,13 @@ class TokenPruningCache:
         self._preallocated_buffers = {}
         self._buffers_initialized = False
         
+        # 🔬 性能调试：记录缓存操作时间
+        self.debug_timing = True
+        self.cache_write_time = 0.0  # 累积缓存写入时间
+        self.cache_read_time = 0.0   # 累积缓存读取时间
+        self.num_cache_writes = 0
+        self.num_cache_reads = 0
+        
     def should_prune_current_step(self) -> bool:
         """判断当前步骤是否需要 prune"""
         if not self.enabled:
@@ -81,6 +88,12 @@ class TokenPruningCache:
         if not self.should_cache_current_step():
             return
         
+        # 🔬 开始计时
+        if self.debug_timing:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+        
         # ⚡ 第一次调用时初始化 buffer
         self._init_buffers_if_needed(layer_idx, image_k, image_v, image_hidden)
         
@@ -97,6 +110,14 @@ class TokenPruningCache:
         
         # 存储 buffer 的引用
         self.layer_caches[layer_idx][self.current_step] = buffer
+        
+        # 🔬 结束计时
+        if self.debug_timing:
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed = start_event.elapsed_time(end_event) / 1000.0  # 转换为秒
+            self.cache_write_time += elapsed
+            self.num_cache_writes += 1
     
     def update_layer_hidden(self, layer_idx: int, image_hidden: torch.Tensor):
         """⚡ 更新某一层缓存中的 hidden states（使用预分配的 buffer）"""
@@ -118,6 +139,12 @@ class TokenPruningCache:
         if not self.should_prune_current_step():
             raise RuntimeError("在非 Pruning 步骤调用 get_cached_layer_kv！")
         
+        # 🔬 开始计时
+        if self.debug_timing:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+        
         cache_step = self.get_cache_step_idx()
         if cache_step is None:
             raise RuntimeError(f"无法确定缓存步骤！current_step={self.current_step}")
@@ -132,13 +159,52 @@ class TokenPruningCache:
             )
         
         cache_dict = self.layer_caches[layer_idx][cache_step]
-        # ⭐ 确保返回的缓存在 GPU 上
-        return cache_dict['k'], cache_dict['v'], cache_dict['hidden']
+        result = cache_dict['k'], cache_dict['v'], cache_dict['hidden']
+        
+        # 🔬 结束计时
+        if self.debug_timing:
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed = start_event.elapsed_time(end_event) / 1000.0
+            self.cache_read_time += elapsed
+            self.num_cache_reads += 1
+        
+        return result
     
     def clear_caches(self):
         """清空所有缓存（但保留预分配的 buffer）"""
         self.layer_caches = {}
         # ⚡ 注意：不清空 _preallocated_buffers，复用已分配的内存
+    
+    def print_timing_stats(self):
+        """🔬 打印缓存操作的时间统计"""
+        if not self.debug_timing:
+            return
+        
+        print("\n" + "=" * 70)
+        print("🔬 缓存操作性能统计")
+        print("=" * 70)
+        print(f"缓存写入:")
+        print(f"  总次数: {self.num_cache_writes}")
+        print(f"  总时间: {self.cache_write_time:.4f}s")
+        if self.num_cache_writes > 0:
+            print(f"  平均时间: {self.cache_write_time/self.num_cache_writes*1000:.2f}ms/次")
+        
+        print(f"\n缓存读取:")
+        print(f"  总次数: {self.num_cache_reads}")
+        print(f"  总时间: {self.cache_read_time:.4f}s")
+        if self.num_cache_reads > 0:
+            print(f"  平均时间: {self.cache_read_time/self.num_cache_reads*1000:.2f}ms/次")
+        
+        print(f"\n总缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
+        print("=" * 70)
+    
+    def reset_timing_stats(self):
+        """重置时间统计"""
+        self.cache_write_time = 0.0
+        self.cache_read_time = 0.0
+        self.num_cache_writes = 0
+        self.num_cache_reads = 0
     
     def get_image_token_slice(self):
         """获取 image tokens 的切片范围"""

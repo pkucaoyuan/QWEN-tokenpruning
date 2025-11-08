@@ -169,6 +169,10 @@ def run_inference_with_pruning(
     inference_time = time.time() - inference_start
     print(f"\n⏱️  推理完成，耗时: {inference_time:.2f} 秒")
     
+    # 🔬 打印缓存操作的详细统计
+    if enable_pruning:
+        global_pruning_cache.print_timing_stats()
+    
     # 保存结果
     print("\n" + "-" * 70)
     print("保存结果:")
