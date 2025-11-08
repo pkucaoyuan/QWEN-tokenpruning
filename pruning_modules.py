@@ -223,6 +223,9 @@ class TokenPruningCache:
         total_count = sum(self.step_layer_count)
         if total_count == 0:
             print("\n⚠️  没有收集到计时数据")
+            print(f"   debug_timing: {self.debug_timing}")
+            print(f"   enabled: {self.enabled}")
+            print(f"   step_layer_count: {self.step_layer_count}")
             return
         
         print("\n" + "=" * 70)

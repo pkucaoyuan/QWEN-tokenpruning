@@ -80,13 +80,16 @@ def setup_pipeline_with_pruning(enable_pruning=True):
     print("\n[4/5] 应用自定义 Processor 到 Transformer...")
     apply_token_pruning_to_transformer(pipe.transformer)
     
-    # 设置 pruning 开关
+    # 设置 pruning 开关和 debug_timing
+    global_pruning_cache.debug_timing = True  # 🔬 强制开启计时
+    global_pruning_cache.enabled = enable_pruning
+    
     if enable_pruning:
         print("   ✅ Token Pruning: 启用")
-        global_pruning_cache.enabled = True
+        print("   🔬 Debug Timing: 启用（会有 CUDA 同步开销）")
     else:
         print("   ⚠️  Token Pruning: 禁用（仅使用自定义 Processor 进行统计）")
-        global_pruning_cache.enabled = False
+        print("   🔬 Debug Timing: 启用（会有 CUDA 同步开销）")
     
     # 5. 移动到 CUDA
     print("\n[5/5] 移动到 CUDA...")
