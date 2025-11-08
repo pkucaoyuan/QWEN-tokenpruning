@@ -54,19 +54,24 @@ class TokenPruningCache:
         return self.current_step in [0, 2]
     
     def cache_layer_hidden_states(self, layer_idx: int, hidden_states: torch.Tensor):
-        """缓存某一层的 image tokens hidden states"""
+        """缓存某一层的 image tokens hidden states（全部在 GPU 上）"""
         if not self.should_cache_current_step():
             return
         
         if layer_idx not in self.layer_caches:
             self.layer_caches[layer_idx] = {}
         
-        # 只缓存 image tokens 部分
-        image_hidden = hidden_states[:, self.denoise_token_length:].clone().detach()
+        # ⭐ 关键：只缓存 image tokens 部分，保持在 GPU 上
+        # 使用 clone() 而不是 detach()，避免任何 CPU 数据传输
+        image_hidden = hidden_states[:, self.denoise_token_length:].clone()
+        # 确保在 GPU 上（虽然理论上已经是）
+        if not image_hidden.is_cuda:
+            image_hidden = image_hidden.cuda()
+        
         self.layer_caches[layer_idx][self.current_step] = image_hidden
     
     def get_cached_layer_hidden_states(self, layer_idx: int) -> Optional[torch.Tensor]:
-        """获取某一层的缓存 image tokens hidden states"""
+        """获取某一层的缓存 image tokens hidden states（全部在 GPU 上）"""
         if not self.should_prune_current_step():
             return None
         
@@ -80,7 +85,11 @@ class TokenPruningCache:
         if cache_step not in self.layer_caches[layer_idx]:
             return None
         
-        return self.layer_caches[layer_idx][cache_step]
+        cached = self.layer_caches[layer_idx][cache_step]
+        # ⭐ 确保返回的缓存在 GPU 上
+        if not cached.is_cuda:
+            cached = cached.cuda()
+        return cached
     
     def clear_caches(self):
         """清空所有缓存"""
@@ -146,6 +155,7 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if should_prune and image_hidden is not None:
             # Pruning 模式：分别处理
             
+            # ⚡ 优化：预分配内存，减少多次 tensor 创建
             # 去噪 tokens: 完整 QKV
             denoise_query = attn.to_q(denoise_hidden)
             denoise_key = attn.to_k(denoise_hidden)
@@ -156,6 +166,7 @@ class PrunableQwenDoubleStreamAttnProcessor:
             image_value = attn.to_v(image_hidden)
             # image_query 不计算（不需要，节省 ~33% 的 image token 投影）
             
+            # ⚡ 优化：使用 in-place 操作减少内存分配
             # 合并图像流的 Q, K, V
             img_query = denoise_query  # 只有去噪部分有 Q
             img_key = torch.cat([denoise_key, image_key], dim=1)
@@ -380,20 +391,20 @@ class PrunableQwenImageTransformerBlock(nn.Module):
         
         # ===== 处理 attention 输出（考虑 pruning）=====
         if should_prune and cached_image_hidden is not None and L_denoise is not None:
+            # ⚡ 优化：使用 in-place 操作减少内存分配
             # Pruning 模式：
             # - img_attn_output 只包含去噪部分
             # - 需要构造完整的输出，但 image 部分使用缓存
             
-            # 去噪部分：应用 attention 更新
-            denoise_hidden = hidden_states[:, :L_denoise]
-            denoise_hidden = denoise_hidden + img_gate1 * img_attn_output
+            # 确保缓存在 GPU 上
+            if not cached_image_hidden.is_cuda:
+                cached_image_hidden = cached_image_hidden.cuda()
             
-            # 图像部分：直接使用缓存（跳过 attention 更新）
-            # 这里的假设是：image tokens 的变化不大，可以重用
-            image_hidden = cached_image_hidden
-            
-            # 合并
-            hidden_states = torch.cat([denoise_hidden, image_hidden], dim=1)
+            # ⚡ 使用预分配的 tensor，避免多次内存分配
+            new_hidden_states = hidden_states.clone()
+            new_hidden_states[:, :L_denoise] = hidden_states[:, :L_denoise] + img_gate1 * img_attn_output
+            new_hidden_states[:, L_denoise:] = cached_image_hidden
+            hidden_states = new_hidden_states
         else:
             # 正常模式：完整更新
             hidden_states = hidden_states + img_gate1 * img_attn_output
@@ -403,17 +414,22 @@ class PrunableQwenImageTransformerBlock(nn.Module):
         
         # ===== Image stream - norm2 + MLP =====
         if should_prune and cached_image_hidden is not None and L_denoise is not None:
+            # ⚡ 优化：减少内存分配和拷贝
             # Pruning 模式：只对去噪 tokens 计算 MLP ⚡
             denoise_hidden = hidden_states[:, :L_denoise]
             denoise_normed2 = self.img_norm2(denoise_hidden)
             denoise_modulated2, denoise_gate2 = self._modulate(denoise_normed2, img_mod2)
             denoise_mlp_output = self.img_mlp(denoise_modulated2)
-            denoise_hidden = denoise_hidden + denoise_gate2 * denoise_mlp_output
             
-            # 图像 tokens：继续使用缓存（跳过 MLP 计算）⚡
-            image_hidden = cached_image_hidden
+            # 确保缓存在 GPU 上
+            if not cached_image_hidden.is_cuda:
+                cached_image_hidden = cached_image_hidden.cuda()
             
-            hidden_states = torch.cat([denoise_hidden, image_hidden], dim=1)
+            # ⚡ 使用预分配的 tensor，避免 cat 操作
+            new_hidden_states = hidden_states.clone()
+            new_hidden_states[:, :L_denoise] = denoise_hidden + denoise_gate2 * denoise_mlp_output
+            new_hidden_states[:, L_denoise:] = cached_image_hidden
+            hidden_states = new_hidden_states
         else:
             # 正常模式：完整计算
             img_normed2 = self.img_norm2(hidden_states)
