@@ -19,11 +19,12 @@ models/qwen-image-edit-lightning-merged/
 *.pth
 *.ckpt
 
-# 图像文件
-*.png
-*.jpg
-*.jpeg
-!example_input.png
+# 图像文件（忽略输出图片，保留示例输入图片）
+output_*.png
+*_output.png
+# 允许提交示例输入图片
+# input.png
+# example_*.png
 
 # IDE
 .vscode/
