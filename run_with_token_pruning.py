@@ -176,7 +176,12 @@ def run_inference_with_pruning(
     print(f"\n⏱️  推理完成，耗时: {inference_time:.2f} 秒")
     
     # 🔬 打印详细的性能统计（Pruning 和 Baseline 都输出）
+    print("\n🔬 开始输出性能统计...")
+    print(f"   debug_timing 状态: {global_pruning_cache.debug_timing}")
+    print(f"   enabled 状态: {global_pruning_cache.enabled}")
+    print(f"   step_layer_count: {global_pruning_cache.step_layer_count}")
     global_pruning_cache.print_timing_stats()
+    print("🔬 性能统计输出完成")
     
     # 保存结果
     print("\n" + "-" * 70)
