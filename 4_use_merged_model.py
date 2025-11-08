@@ -28,12 +28,16 @@ def load_merged_pipeline(model_path="./models/qwen-image-edit-lightning-merged")
         return None
     
     print("正在加载模型...")
-    # ⭐ 修复 meta tensor 问题：直接加载到 CUDA
+    # ⭐ 使用 low_cpu_mem_usage 加载大模型
     pipe = QwenImageEditPipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map="auto"  # ⭐ 自动分配设备
+        low_cpu_mem_usage=True,  # 低内存模式
+        variant="bf16"  # 指定精度变体
     )
+    
+    print("移动到 CUDA...")
+    pipe.to("cuda")
     
     print("\n✅ 融合模型加载完成（无需加载 LoRA）")
     print("   加载速度更快，推理性能相同")
