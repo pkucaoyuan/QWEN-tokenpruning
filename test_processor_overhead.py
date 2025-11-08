@@ -108,6 +108,7 @@ def test_custom_processor_without_pruning():
     
     # ⚠️ 关键：不启用 pruning
     print("\n⚠️  Pruning: 禁用（测试纯 Processor 开销）")
+    global_pruning_cache.enabled = False  # ⚠️ 禁用 pruning
     
     # 加载图像
     input_image = Image.open("input.png").convert("RGB")
@@ -121,7 +122,6 @@ def test_custom_processor_without_pruning():
         width=1620,
         num_inference_steps=4,
         guidance_scale=1.0,
-        enable_pruning=False,  # 禁用 pruning
     ).images[0]
     
     # 正式测试（3次取平均）
@@ -138,7 +138,6 @@ def test_custom_processor_without_pruning():
             width=1620,
             num_inference_steps=4,
             guidance_scale=1.0,
-            enable_pruning=False,  # 禁用 pruning
         ).images[0]
         
         torch.cuda.synchronize()
@@ -184,6 +183,7 @@ def test_custom_processor_with_pruning():
         )
     
     print("\n✅ Pruning: 启用")
+    global_pruning_cache.enabled = True  # ✅ 启用 pruning
     
     # 加载图像
     input_image = Image.open("input.png").convert("RGB")
@@ -197,7 +197,6 @@ def test_custom_processor_with_pruning():
         width=1620,
         num_inference_steps=4,
         guidance_scale=1.0,
-        enable_pruning=True,  # 启用 pruning
     ).images[0]
     
     # 正式测试（3次取平均）
@@ -214,7 +213,6 @@ def test_custom_processor_with_pruning():
             width=1620,
             num_inference_steps=4,
             guidance_scale=1.0,
-            enable_pruning=True,  # 启用 pruning
         ).images[0]
         
         torch.cuda.synchronize()
