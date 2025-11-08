@@ -48,17 +48,18 @@ class TokenPruningCache:
         self.num_clones = 0
         self.num_copies = 0
         
-        # 🔬 详细的操作计时（找出真正的瓶颈）
-        self.time_qkv_projection = 0.0  # QKV 投影时间
-        self.time_reshape = 0.0         # Reshape 时间
-        self.time_norm = 0.0            # Normalization 时间
-        self.time_rope = 0.0            # RoPE 时间
-        self.time_cat = 0.0             # torch.cat 时间
-        self.time_attention = 0.0       # Attention 计算时间
-        self.time_output_proj = 0.0     # 输出投影时间
-        self.time_mlp = 0.0             # MLP 时间
-        self.time_conditions = 0.0      # 条件判断时间
-        self.count_operations = 0       # 操作计数
+        # 🔬 详细的操作计时（按步骤记录）
+        # 每个步骤的各操作时间: [步骤0, 步骤1, 步骤2, 步骤3]
+        self.step_time_qkv = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_reshape = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_norm = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_rope = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_cat = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_attention = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_output_proj = [0.0, 0.0, 0.0, 0.0]
+        self.step_time_mlp = [0.0, 0.0, 0.0, 0.0]
+        self.step_cache_ops = [0.0, 0.0, 0.0, 0.0]  # 缓存操作时间
+        self.step_layer_count = [0, 0, 0, 0]  # 每步的层计数
         
     def should_prune_current_step(self) -> bool:
         """判断当前步骤是否需要 prune"""
@@ -151,6 +152,8 @@ class TokenPruningCache:
             elapsed = start_event.elapsed_time(end_event) / 1000.0  # 转换为秒
             self.cache_write_time += elapsed
             self.num_cache_writes += 1
+            # 记录到对应步骤
+            self.step_cache_ops[self.current_step] += elapsed
     
     def update_layer_hidden(self, layer_idx: int, image_hidden: torch.Tensor):
         """⚡ 更新某一层缓存中的 hidden states（使用预分配的 buffer）"""
@@ -201,6 +204,8 @@ class TokenPruningCache:
             elapsed = start_event.elapsed_time(end_event) / 1000.0
             self.cache_read_time += elapsed
             self.num_cache_reads += 1
+            # 记录到对应步骤
+            self.step_cache_ops[self.current_step] += elapsed
         
         return result
     
@@ -210,39 +215,52 @@ class TokenPruningCache:
         # ⚡ 注意：不清空 _preallocated_buffers，复用已分配的内存
     
     def print_timing_stats(self):
-        """🔬 打印详细的性能统计"""
+        """🔬 打印详细的性能统计（按步骤分解）"""
         if not self.debug_timing:
             return
         
         print("\n" + "=" * 70)
-        print("🔬 详细性能分析（找出瓶颈）")
+        print("🔬 详细性能分析（按步骤）")
         print("=" * 70)
         
-        total_time = (self.time_qkv_projection + self.time_reshape + self.time_norm + 
-                     self.time_rope + self.time_cat + self.time_attention + 
-                     self.time_output_proj + self.time_mlp + self.time_conditions)
+        step_names = ["步骤 1 (完整)", "步骤 2 (Pruning)", "步骤 3 (完整)", "步骤 4 (Pruning)"]
         
-        print(f"操作计数: {self.count_operations} 次")
-        print(f"\n各操作耗时：")
-        print(f"  1️⃣  QKV 投影:     {self.time_qkv_projection:.4f}s ({self.time_qkv_projection/total_time*100:.1f}%)")
-        print(f"  2️⃣  Reshape:      {self.time_reshape:.4f}s ({self.time_reshape/total_time*100:.1f}%)")
-        print(f"  3️⃣  Normalization: {self.time_norm:.4f}s ({self.time_norm/total_time*100:.1f}%)")
-        print(f"  4️⃣  RoPE:         {self.time_rope:.4f}s ({self.time_rope/total_time*100:.1f}%)")
-        print(f"  5️⃣  torch.cat:    {self.time_cat:.4f}s ({self.time_cat/total_time*100:.1f}%)")
-        print(f"  6️⃣  Attention:    {self.time_attention:.4f}s ({self.time_attention/total_time*100:.1f}%)")
-        print(f"  7️⃣  输出投影:     {self.time_output_proj:.4f}s ({self.time_output_proj/total_time*100:.1f}%)")
-        print(f"  8️⃣  MLP:          {self.time_mlp:.4f}s ({self.time_mlp/total_time*100:.1f}%)")
-        print(f"  9️⃣  条件判断:     {self.time_conditions:.4f}s ({self.time_conditions/total_time*100:.1f}%)")
+        for step in range(4):
+            print(f"\n{'='*70}")
+            print(f"📊 {step_names[step]}")
+            print(f"{'='*70}")
+            
+            total = (self.step_time_qkv[step] + self.step_time_reshape[step] + 
+                    self.step_time_norm[step] + self.step_time_rope[step] + 
+                    self.step_time_cat[step] + self.step_time_attention[step] + 
+                    self.step_time_output_proj[step] + self.step_time_mlp[step])
+            
+            print(f"层数: {self.step_layer_count[step]}")
+            print(f"\n各操作耗时（60层累积）:")
+            print(f"  QKV 投影:      {self.step_time_qkv[step]:.4f}s ({self.step_time_qkv[step]/total*100:5.1f}%)")
+            print(f"  Reshape:       {self.step_time_reshape[step]:.4f}s ({self.step_time_reshape[step]/total*100:5.1f}%)")
+            print(f"  Normalization: {self.step_time_norm[step]:.4f}s ({self.step_time_norm[step]/total*100:5.1f}%)")
+            print(f"  RoPE:          {self.step_time_rope[step]:.4f}s ({self.step_time_rope[step]/total*100:5.1f}%)")
+            print(f"  torch.cat:     {self.step_time_cat[step]:.4f}s ({self.step_time_cat[step]/total*100:5.1f}%)")
+            print(f"  Attention:     {self.step_time_attention[step]:.4f}s ({self.step_time_attention[step]/total*100:5.1f}%)")
+            print(f"  输出投影:      {self.step_time_output_proj[step]:.4f}s ({self.step_time_output_proj[step]/total*100:5.1f}%)")
+            print(f"  MLP:           {self.step_time_mlp[step]:.4f}s ({self.step_time_mlp[step]/total*100:5.1f}%)")
+            print(f"  缓存操作:      {self.step_cache_ops[step]:.4f}s ({self.step_cache_ops[step]/total*100:5.1f}%)")
+            
+            print(f"\n  ✅ 统计的总时间: {total:.4f}s")
         
-        print(f"\n缓存操作：")
-        print(f"  写入次数: {self.num_cache_writes}, 时间: {self.cache_write_time:.4f}s")
-        print(f"  读取次数: {self.num_cache_reads}, 时间: {self.cache_read_time:.4f}s")
-        print(f"  缓存总开销: {self.cache_write_time + self.cache_read_time:.4f}s")
+        # 对比分析
+        print(f"\n" + "=" * 70)
+        print(f"📊 关键对比")
+        print(f"=" * 70)
         
-        print(f"\n" + "-" * 70)
-        print(f"📊 统计的总时间: {total_time:.4f}s")
-        print(f"   缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
-        print(f"   计算+缓存: {total_time + self.cache_write_time + self.cache_read_time:.4f}s")
+        avg_full = (self.step_time_qkv[0] + self.step_time_qkv[2]) / 2
+        avg_pruning = (self.step_time_qkv[1] + self.step_time_qkv[3]) / 2
+        print(f"\nQKV 投影:")
+        print(f"  完整步骤平均: {avg_full:.4f}s")
+        print(f"  Pruning平均:  {avg_pruning:.4f}s")
+        print(f"  差异: {avg_pruning - avg_full:.4f}s ({(avg_pruning/avg_full-1)*100:+.1f}%)")
+        
         print("=" * 70)
     
     def reset_timing_stats(self):
@@ -315,7 +333,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_start = torch.cuda.Event(enable_timing=True)
             op_end = torch.cuda.Event(enable_timing=True)
-            global_pruning_cache.count_operations += 1
+            current_step = global_pruning_cache.current_step
+            global_pruning_cache.step_layer_count[current_step] += 1
         
         # 检查是否需要 pruning
         should_prune = global_pruning_cache.should_prune_current_step()
@@ -399,7 +418,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_qkv_projection += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_qkv[current_step] += elapsed
         
         # ===== Reshape for multi-head attention =====
         # 🔬 计时 Reshape
@@ -419,7 +439,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_reshape += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_reshape[current_step] += elapsed
         
         # ===== QK normalization =====
         # 🔬 计时 Normalization
@@ -441,7 +462,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_norm += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_norm[current_step] += elapsed
         
         # ===== Apply RoPE =====
         # 🔬 计时 RoPE
@@ -462,7 +484,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_rope += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_rope[current_step] += elapsed
         
         # ⚡⚡⚡ 关键修复：在 reshape/norm/RoPE 之后缓存！
         if should_cache and L_denoise is not None and not should_prune:
@@ -488,7 +511,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_cat += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_cat[current_step] += elapsed
         
         # ===== Attention mask 处理 =====
         # 🔬 计时 Attention
@@ -535,7 +559,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_attention += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_attention[current_step] += elapsed
         
         # ===== Reshape back =====
         # 🔬 计时输出投影
@@ -559,7 +584,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
         if global_pruning_cache.debug_timing:
             op_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_output_proj += op_start.elapsed_time(op_end) / 1000.0
+            elapsed = op_start.elapsed_time(op_end) / 1000.0
+            global_pruning_cache.step_time_output_proj[current_step] += elapsed
         
         # ===== 返回输出 =====
         # 注意：在 pruning 模式下，img_attn_output 只包含去噪部分
@@ -725,7 +751,9 @@ class PrunableQwenImageTransformerBlock(nn.Module):
         if global_pruning_cache.debug_timing:
             mlp_end.record()
             torch.cuda.synchronize()
-            global_pruning_cache.time_mlp += mlp_start.elapsed_time(mlp_end) / 1000.0
+            elapsed = mlp_start.elapsed_time(mlp_end) / 1000.0
+            current_step = global_pruning_cache.current_step
+            global_pruning_cache.step_time_mlp[current_step] += elapsed
         
         # ===== Clip for fp16 =====
         if encoder_hidden_states.dtype == torch.float16:
