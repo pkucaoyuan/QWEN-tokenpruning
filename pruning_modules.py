@@ -42,6 +42,12 @@ class TokenPruningCache:
         self.num_cache_writes = 0
         self.num_cache_reads = 0
         
+        # 🔬 更细致的计时
+        self.clone_time = 0.0  # clone() 操作时间
+        self.copy_time = 0.0   # copy_() 操作时间
+        self.num_clones = 0
+        self.num_copies = 0
+        
     def should_prune_current_step(self) -> bool:
         """判断当前步骤是否需要 prune"""
         if not self.enabled:
@@ -103,10 +109,25 @@ class TokenPruningCache:
         # ⚡ 使用预分配的 buffer，通过 copy_() 进行 in-place 拷贝
         # 避免 clone() 触发新的内存分配
         buffer = self._preallocated_buffers[layer_idx][self.current_step]
+        
+        # 🔬 计时 copy 操作
+        if self.debug_timing:
+            copy_start = torch.cuda.Event(enable_timing=True)
+            copy_end = torch.cuda.Event(enable_timing=True)
+            copy_start.record()
+        
         buffer['k'].copy_(image_k)
         buffer['v'].copy_(image_v)
         if image_hidden is not None and buffer['hidden'] is not None:
             buffer['hidden'].copy_(image_hidden)
+        
+        # 🔬 结束计时
+        if self.debug_timing:
+            copy_end.record()
+            torch.cuda.synchronize()
+            copy_elapsed = copy_start.elapsed_time(copy_end) / 1000.0
+            self.copy_time += copy_elapsed
+            self.num_copies += 1
         
         # 存储 buffer 的引用
         self.layer_caches[layer_idx][self.current_step] = buffer
@@ -182,21 +203,37 @@ class TokenPruningCache:
             return
         
         print("\n" + "=" * 70)
-        print("🔬 缓存操作性能统计")
+        print("🔬 缓存操作性能统计（详细）")
         print("=" * 70)
-        print(f"缓存写入:")
+        
+        print(f"1️⃣ Clone 操作:")
+        print(f"  次数: {self.num_clones}")
+        print(f"  时间: {self.clone_time:.4f}s")
+        if self.num_clones > 0:
+            print(f"  平均: {self.clone_time/self.num_clones*1000:.2f}ms/次")
+        
+        print(f"\n2️⃣ Copy 操作:")
+        print(f"  次数: {self.num_copies}")
+        print(f"  时间: {self.copy_time:.4f}s")
+        if self.num_copies > 0:
+            print(f"  平均: {self.copy_time/self.num_copies*1000:.2f}ms/次")
+        
+        print(f"\n3️⃣ 缓存写入（clone + copy）:")
         print(f"  总次数: {self.num_cache_writes}")
         print(f"  总时间: {self.cache_write_time:.4f}s")
         if self.num_cache_writes > 0:
-            print(f"  平均时间: {self.cache_write_time/self.num_cache_writes*1000:.2f}ms/次")
+            print(f"  平均: {self.cache_write_time/self.num_cache_writes*1000:.2f}ms/次")
         
-        print(f"\n缓存读取:")
+        print(f"\n4️⃣ 缓存读取:")
         print(f"  总次数: {self.num_cache_reads}")
         print(f"  总时间: {self.cache_read_time:.4f}s")
         if self.num_cache_reads > 0:
-            print(f"  平均时间: {self.cache_read_time/self.num_cache_reads*1000:.2f}ms/次")
+            print(f"  平均: {self.cache_read_time/self.num_cache_reads*1000:.2f}ms/次")
         
-        print(f"\n总缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
+        print(f"\n" + "-" * 70)
+        print(f"📊 总缓存开销: {self.cache_write_time + self.cache_read_time:.4f}s")
+        print(f"   - Clone 贡献: {self.clone_time:.4f}s ({self.clone_time/(self.cache_write_time+self.cache_read_time+0.0001)*100:.1f}%)")
+        print(f"   - Copy 贡献: {self.copy_time:.4f}s ({self.copy_time/(self.cache_write_time+self.cache_read_time+0.0001)*100:.1f}%)")
         print("=" * 70)
     
     def reset_timing_stats(self):
@@ -394,6 +431,8 @@ class PrunableQwenDoubleStreamAttnProcessor:
                     clone_end.record()
                     torch.cuda.synchronize()
                     clone_time = clone_start.elapsed_time(clone_end) / 1000.0
+                    global_pruning_cache.clone_time += clone_time
+                    global_pruning_cache.num_clones += 2  # K 和 V
                     global_pruning_cache.cache_write_time += clone_time  # 加到写入时间
                 
                 global_pruning_cache.cache_layer_kv(layer_idx, image_k, image_v, None)
@@ -634,6 +673,8 @@ class PrunableQwenImageTransformerBlock(nn.Module):
                 clone_end.record()
                 torch.cuda.synchronize()
                 clone_time = clone_start.elapsed_time(clone_end) / 1000.0
+                global_pruning_cache.clone_time += clone_time
+                global_pruning_cache.num_clones += 1  # hidden
                 global_pruning_cache.cache_write_time += clone_time  # 加到写入时间
             
             global_pruning_cache.update_layer_hidden(self.layer_idx, image_hidden_final)
