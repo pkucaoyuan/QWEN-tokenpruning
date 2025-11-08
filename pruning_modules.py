@@ -53,31 +53,61 @@ class TokenPruningCache:
         # 步骤 0 和 2 (步骤 1 和 3) 需要缓存
         return self.current_step in [0, 2]
     
+    def _init_buffers_if_needed(self, layer_idx: int, image_k: torch.Tensor, image_v: torch.Tensor, image_hidden: torch.Tensor = None):
+        """⚡ 预分配缓存 buffer（只在第一次调用时）"""
+        if layer_idx in self._preallocated_buffers:
+            return
+        
+        # 为每一层预分配 2 个步骤的缓存（步骤 0 和 2）
+        self._preallocated_buffers[layer_idx] = {
+            0: {
+                'k': torch.empty_like(image_k),
+                'v': torch.empty_like(image_v),
+                'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
+            },
+            2: {
+                'k': torch.empty_like(image_k),
+                'v': torch.empty_like(image_v),
+                'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
+            }
+        }
+    
     def cache_layer_kv(self, layer_idx: int, image_k: torch.Tensor, image_v: torch.Tensor, image_hidden: torch.Tensor = None):
-        """缓存某一层的 image tokens K, V 和 hidden states（全部在 GPU 上）"""
+        """⚡ 缓存某一层的 image tokens K, V（使用预分配的 buffer，避免 cudaMalloc）"""
         if not self.should_cache_current_step():
             return
+        
+        # ⚡ 第一次调用时初始化 buffer
+        self._init_buffers_if_needed(layer_idx, image_k, image_v, image_hidden)
         
         if layer_idx not in self.layer_caches:
             self.layer_caches[layer_idx] = {}
         
-        # ⚡ 优化：传入的 tensor 已经是 clone 过的，直接使用，避免双重 clone
-        # 只需确保在 GPU 上（通常已经是）
-        cache_dict = {
-            'k': image_k if image_k.is_cuda else image_k.cuda(),
-            'v': image_v if image_v.is_cuda else image_v.cuda(),
-            'hidden': image_hidden if (image_hidden is None or image_hidden.is_cuda) else image_hidden.cuda(),
-        }
+        # ⚡ 使用预分配的 buffer，通过 copy_() 进行 in-place 拷贝
+        # 避免 clone() 触发新的内存分配
+        buffer = self._preallocated_buffers[layer_idx][self.current_step]
+        buffer['k'].copy_(image_k)
+        buffer['v'].copy_(image_v)
+        if image_hidden is not None and buffer['hidden'] is not None:
+            buffer['hidden'].copy_(image_hidden)
         
-        self.layer_caches[layer_idx][self.current_step] = cache_dict
+        # 存储 buffer 的引用
+        self.layer_caches[layer_idx][self.current_step] = buffer
     
     def update_layer_hidden(self, layer_idx: int, image_hidden: torch.Tensor):
-        """更新某一层缓存中的 hidden states"""
+        """⚡ 更新某一层缓存中的 hidden states（使用预分配的 buffer）"""
         if not self.should_cache_current_step():
             return
         
         if layer_idx in self.layer_caches and self.current_step in self.layer_caches[layer_idx]:
-            self.layer_caches[layer_idx][self.current_step]['hidden'] = image_hidden if image_hidden.is_cuda else image_hidden.cuda()
+            buffer = self.layer_caches[layer_idx][self.current_step]
+            
+            # ⚡ 如果 buffer 的 hidden 还没初始化（第一次遇到 hidden）
+            if buffer['hidden'] is None:
+                buffer['hidden'] = torch.empty_like(image_hidden)
+            
+            # ⚡ 使用 copy_() 进行 in-place 拷贝
+            buffer['hidden'].copy_(image_hidden)
     
     def get_cached_layer_kv(self, layer_idx: int):
         """获取某一层的缓存 image tokens K, V 和 hidden states（全部在 GPU 上）"""
@@ -99,8 +129,9 @@ class TokenPruningCache:
         return cache_dict['k'], cache_dict['v'], cache_dict['hidden']
     
     def clear_caches(self):
-        """清空所有缓存"""
+        """清空所有缓存（但保留预分配的 buffer）"""
         self.layer_caches = {}
+        # ⚡ 注意：不清空 _preallocated_buffers，复用已分配的内存
     
     def get_image_token_slice(self):
         """获取 image tokens 的切片范围"""
@@ -200,15 +231,14 @@ class PrunableQwenDoubleStreamAttnProcessor:
             img_key = attn.to_k(hidden_states)
             img_value = attn.to_v(hidden_states)
             
-            # ⚡ 如果需要缓存，保存 image tokens 的 K, V（只 clone 一次，避免双重 clone）
+            # ⚡ 如果需要缓存，保存 image tokens 的 K, V
             if should_cache and L_denoise is not None:
                 layer_idx = getattr(attn, '_layer_idx', None)
                 if layer_idx is not None:
-                    # ⚡ 优化：分离 image tokens 的 K, V，clone 一次
-                    # cache_layer_kv 不会再次 clone，避免双重内存拷贝
-                    # 注意：hidden_states 将在 Block 结束时缓存（而不是这里）
-                    image_k = img_key[:, L_denoise:].clone()
-                    image_v = img_value[:, L_denoise:].clone()
+                    # ⚡ 直接传递 slice（view），cache_layer_kv 会使用 copy_() 到预分配的 buffer
+                    # 避免 clone() 触发新的内存分配
+                    image_k = img_key[:, L_denoise:]
+                    image_v = img_value[:, L_denoise:]
                     # 暂时用 None 占位，Block 层面会更新
                     global_pruning_cache.cache_layer_kv(layer_idx, image_k, image_v, None)
         
@@ -468,7 +498,8 @@ class PrunableQwenImageTransformerBlock(nn.Module):
         # ⭐ 在 Block 结束时，更新缓存的 hidden states（如果需要）
         # 这样缓存的是经过 Attention + MLP 的最终状态
         if global_pruning_cache.should_cache_current_step() and L_denoise is not None:
-            image_hidden_final = hidden_states[:, L_denoise:].clone()
+            # ⚡ 直接传递 slice，update_layer_hidden 会使用 copy_() 到预分配的 buffer
+            image_hidden_final = hidden_states[:, L_denoise:]
             global_pruning_cache.update_layer_hidden(self.layer_idx, image_hidden_final)
         
         return encoder_hidden_states, hidden_states
