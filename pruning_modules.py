@@ -36,7 +36,7 @@ class TokenPruningCache:
         self._buffers_initialized = False
         
         # 🔬 性能调试：记录缓存操作时间
-        self.debug_timing = True  # 🔬 开启计时以收集详细统计
+        self.debug_timing = False  # ⚡ 默认关闭以获得真实性能
         self.cache_write_time = 0.0  # 累积缓存写入时间
         self.cache_read_time = 0.0   # 累积缓存读取时间
         self.num_cache_writes = 0

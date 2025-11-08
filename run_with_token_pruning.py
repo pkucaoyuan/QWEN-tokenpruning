@@ -81,15 +81,15 @@ def setup_pipeline_with_pruning(enable_pruning=True):
     apply_token_pruning_to_transformer(pipe.transformer)
     
     # 设置 pruning 开关和 debug_timing
-    global_pruning_cache.debug_timing = True  # 🔬 强制开启计时
+    global_pruning_cache.debug_timing = False  # ⚡ 关闭计时以获得真实性能
     global_pruning_cache.enabled = enable_pruning
     
     if enable_pruning:
         print("   ✅ Token Pruning: 启用")
-        print("   🔬 Debug Timing: 启用（会有 CUDA 同步开销）")
+        print("   ⚡ Debug Timing: 关闭（获得真实性能）")
     else:
-        print("   ⚠️  Token Pruning: 禁用（仅使用自定义 Processor 进行统计）")
-        print("   🔬 Debug Timing: 启用（会有 CUDA 同步开销）")
+        print("   ⚠️  Token Pruning: 禁用")
+        print("   ⚡ Debug Timing: 关闭（获得真实性能）")
     
     # 5. 移动到 CUDA
     print("\n[5/5] 移动到 CUDA...")
@@ -175,13 +175,10 @@ def run_inference_with_pruning(
     inference_time = time.time() - inference_start
     print(f"\n⏱️  推理完成，耗时: {inference_time:.2f} 秒")
     
-    # 🔬 打印详细的性能统计（Pruning 和 Baseline 都输出）
-    print("\n🔬 开始输出性能统计...")
-    print(f"   debug_timing 状态: {global_pruning_cache.debug_timing}")
-    print(f"   enabled 状态: {global_pruning_cache.enabled}")
-    print(f"   step_layer_count: {global_pruning_cache.step_layer_count}")
-    global_pruning_cache.print_timing_stats()
-    print("🔬 性能统计输出完成")
+    # 🔬 打印详细的性能统计（如果开启了 debug_timing）
+    # 注意：debug_timing 会引入约 0.4s 的 CUDA 同步开销
+    if global_pruning_cache.debug_timing:
+        global_pruning_cache.print_timing_stats()
     
     # 保存结果
     print("\n" + "-" * 70)
