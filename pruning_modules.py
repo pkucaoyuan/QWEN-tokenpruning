@@ -31,6 +31,10 @@ class TokenPruningCache:
         # 例如: layer_caches[0][0] = 第0层在步骤0的 image tokens hidden states
         self.layer_caches = {}  # {layer_idx: {0: tensor, 2: tensor}}
         
+        # ⚡ 预分配的 buffer（避免频繁的 GPU 内存分配）
+        self._preallocated_buffers = {}
+        self._buffers_initialized = False
+        
     def should_prune_current_step(self) -> bool:
         """判断当前步骤是否需要 prune"""
         if not self.enabled:
