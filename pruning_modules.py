@@ -34,6 +34,8 @@ class TokenPruningCache:
         # ⚡ 预分配的 buffer（避免频繁的 GPU 内存分配）
         self._preallocated_buffers = {}
         self._buffers_initialized = False
+        # 🔧 记录当前 buffer 的 token 长度，用于检测是否需要重新分配
+        self._cached_token_length = None  # 记录上一次缓存时的 token 长度
         
         # 🔬 性能调试：记录缓存操作时间
         self.debug_timing = True  # 🔬 开启以收集详细统计
@@ -84,23 +86,38 @@ class TokenPruningCache:
         return self.current_step in [0, 2]
     
     def _init_buffers_if_needed(self, layer_idx: int, image_k: torch.Tensor, image_v: torch.Tensor, image_hidden: torch.Tensor = None):
-        """⚡ 预分配缓存 buffer（只在第一次调用时）"""
-        if layer_idx in self._preallocated_buffers:
-            return
+        """⚡ 预分配缓存 buffer（检查大小是否匹配，如果不匹配则重新分配）"""
+        # 🔧 获取当前 token 长度（image tokens 的数量）
+        current_token_length = image_k.shape[1]
         
-        # 为每一层预分配 2 个步骤的缓存（步骤 0 和 2）
-        self._preallocated_buffers[layer_idx] = {
-            0: {
-                'k': torch.empty_like(image_k),
-                'v': torch.empty_like(image_v),
-                'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
-            },
-            2: {
-                'k': torch.empty_like(image_k),
-                'v': torch.empty_like(image_v),
-                'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
+        # 🔧 检查是否需要重新分配 buffer（token 长度改变或 buffer 不存在）
+        need_realloc = False
+        if layer_idx not in self._preallocated_buffers:
+            need_realloc = True
+        elif self._cached_token_length is None or self._cached_token_length != current_token_length:
+            # Token 长度改变，需要重新分配所有层的 buffer
+            need_realloc = True
+        
+        if need_realloc:
+            # 清空所有预分配的 buffers（因为 token 长度改变了）
+            self._preallocated_buffers.clear()
+            self._cached_token_length = current_token_length
+        
+        # 如果该层还没有 buffer，则分配
+        if layer_idx not in self._preallocated_buffers:
+            # 为每一层预分配 2 个步骤的缓存（步骤 0 和 2）
+            self._preallocated_buffers[layer_idx] = {
+                0: {
+                    'k': torch.empty_like(image_k),
+                    'v': torch.empty_like(image_v),
+                    'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
+                },
+                2: {
+                    'k': torch.empty_like(image_k),
+                    'v': torch.empty_like(image_v),
+                    'hidden': torch.empty_like(image_hidden) if image_hidden is not None else None,
+                }
             }
-        }
     
     def cache_layer_kv(self, layer_idx: int, image_k: torch.Tensor, image_v: torch.Tensor, image_hidden: torch.Tensor = None):
         """⚡ 缓存某一层的 image tokens K, V（使用预分配的 buffer，避免 cudaMalloc）"""
@@ -123,6 +140,16 @@ class TokenPruningCache:
         # 避免 clone() 触发新的内存分配
         buffer = self._preallocated_buffers[layer_idx][self.current_step]
         
+        # 🔧 检查 buffer 大小是否匹配
+        if buffer['k'].shape != image_k.shape or buffer['v'].shape != image_v.shape:
+            # Buffer 大小不匹配，重新分配（这种情况应该很少见，因为 _init_buffers_if_needed 已经检查过了）
+            # 但为了安全起见，这里也做检查
+            raise RuntimeError(
+                f"Buffer size mismatch! Expected k={buffer['k'].shape}, v={buffer['v'].shape}, "
+                f"but got k={image_k.shape}, v={image_v.shape}. "
+                f"This usually means token length changed. Please call clear_caches() first."
+            )
+        
         # 🔬 计时 copy 操作
         if self.debug_timing:
             copy_start = torch.cuda.Event(enable_timing=True)
@@ -132,6 +159,9 @@ class TokenPruningCache:
         buffer['k'].copy_(image_k)
         buffer['v'].copy_(image_v)
         if image_hidden is not None and buffer['hidden'] is not None:
+            if buffer['hidden'].shape != image_hidden.shape:
+                # Hidden buffer 大小不匹配，重新分配
+                buffer['hidden'] = torch.empty_like(image_hidden)
             buffer['hidden'].copy_(image_hidden)
         
         # 🔬 结束计时
@@ -165,6 +195,9 @@ class TokenPruningCache:
             
             # ⚡ 如果 buffer 的 hidden 还没初始化（第一次遇到 hidden）
             if buffer['hidden'] is None:
+                buffer['hidden'] = torch.empty_like(image_hidden)
+            elif buffer['hidden'].shape != image_hidden.shape:
+                # 🔧 Buffer 大小不匹配，重新分配
                 buffer['hidden'] = torch.empty_like(image_hidden)
             
             # ⚡ 使用 copy_() 进行 in-place 拷贝
@@ -210,9 +243,12 @@ class TokenPruningCache:
         return result
     
     def clear_caches(self):
-        """清空所有缓存（但保留预分配的 buffer）"""
+        """清空所有缓存"""
         self.layer_caches = {}
-        # ⚡ 注意：不清空 _preallocated_buffers，复用已分配的内存
+        # 🔧 检查 image token 长度是否改变，如果改变则清空预分配的 buffers
+        # 注意：在 _init_buffers_if_needed 中会根据实际的 image_k.shape[1] 检查并重新分配
+        # 这里只清空 layer_caches，保留预分配的 buffers（如果 token 长度没变可以复用）
+        # 实际的 buffer 重新分配会在 _init_buffers_if_needed 中根据 tensor 大小自动处理
     
     def print_timing_stats(self):
         """🔬 打印详细的性能统计（按步骤分解）"""

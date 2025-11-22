@@ -1,4 +1,4 @@
-from run_with_token_pruning import setup_pipeline_with_pruning
+from run_with_token_pruning import setup_pipeline_with_pruning_plus
 import os
 from PIL import Image
 import torch
@@ -22,17 +22,20 @@ DEVICE_ID = 0
 
 
 def main():
-    image_paths = [os.path.join("datasets/edit-test-img", f"{i}.png") for i in range(80)]
+    # 使用实际的测试集路径
+    testset_dir = "datasets/token-pruning/edit-testset"
+    image_paths = [os.path.join(testset_dir, f"{i}.png") for i in range(80)]
     
     image_pils = [Image.open(image_path).convert("RGB") for image_path in image_paths]
-    caption_path = "datasets/edit-test-img/captions.txt"
-    output_dir = os.path.join(OUTPUT_DIR, f"{'pruning' if ENABLE_PRUNING else 'no_pruning'}")
+    caption_path = os.path.join(testset_dir, "captions.txt")
+    # 输出到对应的目录
+    output_dir = os.path.join("datasets/token-pruning", f"{'pruning' if ENABLE_PRUNING else 'no_pruning'}")
     os.makedirs(output_dir, exist_ok=True)
     output_image_paths = [os.path.join(output_dir, f"{i}.png") for i in range(80)]
 
     prompts = open(caption_path, "r").readlines()
 
-    pipeline = setup_pipeline_with_pruning(enable_pruning=ENABLE_PRUNING)
+    pipeline = setup_pipeline_with_pruning_plus(enable_pruning=ENABLE_PRUNING)
 
     total_inference_time = 0
     failed_count = 0

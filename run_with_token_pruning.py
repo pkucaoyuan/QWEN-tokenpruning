@@ -25,7 +25,10 @@ from pruning_modules import (
     global_pruning_cache,
     apply_token_pruning_to_transformer
 )
-from pruning_pipeline_full import TokenPruningQwenImageEditPipeline
+from pruning_pipeline_full import (
+    TokenPruningQwenImageEditPipeline,
+    TokenPruningQwenImageEditPlusPipeline
+)
 
 
 def setup_pipeline_with_pruning(enable_pruning=True):
@@ -64,6 +67,80 @@ def setup_pipeline_with_pruning(enable_pruning=True):
     print("\n[2/5] 加载基础模型: Qwen/Qwen-Image-Edit...")
     pipe = TokenPruningQwenImageEditPipeline.from_pretrained(
         "Qwen/Qwen-Image-Edit",
+        scheduler=scheduler,
+        torch_dtype=torch.bfloat16
+    )
+    
+    # 3. 加载 Lightning LoRA
+    print("\n[3/5] 加载 Lightning LoRA 权重...")
+    pipe.load_lora_weights(
+        "lightx2v/Qwen-Image-Lightning",
+        weight_name="Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"
+    )
+    print("   ✅ LoRA 加载成功")
+    
+    # 4. 应用自定义 Processor（无论是否启用 Pruning，都应用以便统计）
+    print("\n[4/5] 应用自定义 Processor 到 Transformer...")
+    apply_token_pruning_to_transformer(pipe.transformer)
+    
+    # 设置 pruning 开关和 debug_timing
+    global_pruning_cache.debug_timing = True  # 🔬 开启详细计时
+    global_pruning_cache.enabled = enable_pruning
+    
+    if enable_pruning:
+        print("   ✅ Token Pruning: 启用")
+        print("   🔬 Debug Timing: 开启（会有约 0.4s 的同步开销）")
+    else:
+        print("   ⚠️  Token Pruning: 禁用")
+        print("   🔬 Debug Timing: 开启（会有约 0.4s 的同步开销）")
+    
+    # 5. 移动到 CUDA
+    print("\n[5/5] 移动到 CUDA...")
+    pipe.to("cuda")
+    
+    print("\n" + "=" * 70)
+    print("✅ Pipeline 设置完成！")
+    print("=" * 70)
+    
+    return pipe
+
+
+def setup_pipeline_with_pruning_plus(enable_pruning=True):
+    """
+    设置带 Token Pruning 的 QwenImageEditPlusPipeline（对应 Qwen/Qwen-Image-Edit-2509）
+    """
+    print("=" * 70)
+    print("设置 Qwen-Image-Edit-2509 Lightning Pipeline (PlusPipeline)")
+    if enable_pruning:
+        print("Token Pruning: ✅ 启用 (步骤 1,3 完整; 步骤 2,4 缓存)")
+    else:
+        print("Token Pruning: ❌ 禁用 (基线对比)")
+    print("=" * 70)
+    
+    # 1. 配置调度器
+    print("\n[1/5] 配置 FlowMatchEulerDiscreteScheduler...")
+    scheduler_config = {
+        "base_image_seq_len": 256,
+        "base_shift": math.log(3),
+        "invert_sigmas": False,
+        "max_image_seq_len": 8192,
+        "max_shift": math.log(3),
+        "num_train_timesteps": 1000,
+        "shift": 1.0,
+        "shift_terminal": None,
+        "stochastic_sampling": False,
+        "time_shift_type": "exponential",
+        "use_beta_sigmas": False,
+        "use_dynamic_shifting": True,
+        "use_exponential_sigmas": False,
+        "use_karras_sigmas": False,
+    }
+    scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+    
+    # 2. 加载基础模型（使用 PlusPipeline）
+    print("\n[2/5] 加载基础模型: Qwen/Qwen-Image-Edit-2509 (PlusPipeline)...")
+    pipe = TokenPruningQwenImageEditPlusPipeline.from_pretrained(
+        "Qwen/Qwen-Image-Edit-2509",
         scheduler=scheduler,
         torch_dtype=torch.bfloat16
     )

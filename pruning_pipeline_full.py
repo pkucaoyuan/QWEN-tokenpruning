@@ -16,6 +16,14 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 从本地文件导入 QwenImageEditPlusPipeline（因为可能不在安装的 diffusers 包中）
+from pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
+
+# 导入必要的函数
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from pruning_modules import global_pruning_cache
 
 
