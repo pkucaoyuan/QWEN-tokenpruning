@@ -15,41 +15,50 @@ from diffusers.pipelines.qwenimage.pipeline_output import QwenImagePipelineOutpu
 import sys
 import os
 
-# 从本地文件直接导入 QwenImageEditPlusPipeline 类（跳过 __init__.py 避免相对导入问题）
-# 获取 pipelines 目录的路径
+# 设置路径以便导入本地模块
 _pruning_pipeline_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _pruning_pipeline_dir)
+
+# 从本地文件直接导入 QwenImageEditPlusPipeline 类
+# 需要先设置正确的包路径以便相对导入工作
 _pipelines_dir = os.path.join(_pruning_pipeline_dir, "pipelines")
 _qwenimage_dir = os.path.join(_pipelines_dir, "qwenimage")
 _edit_plus_file = os.path.join(_qwenimage_dir, "pipeline_qwenimage_edit_plus.py")
 
-# 直接导入模块文件
-if os.path.exists(_edit_plus_file):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("pipeline_qwenimage_edit_plus", _edit_plus_file)
-    edit_plus_module = importlib.util.module_from_spec(spec)
-    # 临时添加到 sys.modules 以便解决相对导入
-    sys.modules["diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus"] = edit_plus_module
-    sys.modules["pipelines.qwenimage.pipeline_qwenimage_edit_plus"] = edit_plus_module
-    # 需要设置一些路径以便相对导入工作
-    _diffusers_parent = os.path.dirname(_pipelines_dir)
-    if _diffusers_parent not in sys.path:
-        sys.path.insert(0, _diffusers_parent)
-    spec.loader.exec_module(edit_plus_module)
-    QwenImageEditPlusPipeline = edit_plus_module.QwenImageEditPlusPipeline
-else:
-    # 如果文件不存在，尝试从 diffusers 导入
-    try:
-        from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
-    except ImportError:
-        raise ImportError(
-            f"无法找到 QwenImageEditPlusPipeline。请确保文件存在于: {_edit_plus_file}\n"
-            "或者从 diffusers 包中导入。"
+# 先尝试从 diffusers 导入（如果安装了包含 PlusPipeline 的版本）
+try:
+    from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
+except ImportError:
+    # 如果无法从 diffusers 导入，使用 importlib 直接加载本地文件
+    if os.path.exists(_edit_plus_file):
+        import importlib.util
+        # 设置模块搜索路径以便相对导入能工作
+        _root_dir = os.path.dirname(_pruning_pipeline_dir)  # 项目根目录
+        if _root_dir not in sys.path:
+            sys.path.insert(0, _root_dir)
+        
+        # 创建假的包结构以便相对导入能工作
+        if "diffusers" not in sys.modules:
+            import types
+            sys.modules["diffusers"] = types.ModuleType("diffusers")
+            sys.modules["diffusers.pipelines"] = types.ModuleType("diffusers.pipelines")
+            sys.modules["diffusers.pipelines.qwenimage"] = types.ModuleType("diffusers.pipelines.qwenimage")
+        
+        # 加载模块
+        spec = importlib.util.spec_from_file_location(
+            "diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus", 
+            _edit_plus_file
         )
-
-# 导入必要的函数
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        edit_plus_module = importlib.util.module_from_spec(spec)
+        sys.modules["diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus"] = edit_plus_module
+        spec.loader.exec_module(edit_plus_module)
+        QwenImageEditPlusPipeline = edit_plus_module.QwenImageEditPlusPipeline
+    else:
+        raise ImportError(
+            f"无法找到 QwenImageEditPlusPipeline。\n"
+            f"请确保文件存在于: {_edit_plus_file}\n"
+            "或者安装包含 QwenImageEditPlusPipeline 的 diffusers 版本。"
+        )
 
 from pruning_modules import global_pruning_cache
 
